@@ -20,6 +20,7 @@ import swift3
 
 setup(name='swift3',
       version=swift3.version,
+      py_modules=['swift_swob'],
       description='Swift AmazonS3 API emulation Middleware',
       author='OpenStack, LLC.',
       author_email='openstack@lists.launchpad.net',

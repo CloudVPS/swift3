@@ -66,7 +66,11 @@ import re
 from swift.common.utils import split_path
 from swift.common.utils import get_logger
 from swift.common.wsgi import WSGIContext
-from swift.common.swob import Request, Response
+try:
+    from swift.common.swob import Request, Response
+except ImportError:
+    from swift_swob import Request, Response
+
 from swift.common.http import HTTP_OK, HTTP_CREATED, HTTP_ACCEPTED, \
     HTTP_NO_CONTENT, HTTP_BAD_REQUEST, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, \
     HTTP_NOT_FOUND, HTTP_CONFLICT, HTTP_UNPROCESSABLE_ENTITY, is_success, \
@@ -269,7 +273,8 @@ def canonical_string(req):
     # RAW_PATH_INFO is enabled in later version than eventlet 0.9.17.
     # When using older version, swift3 uses req.path of swob instead
     # of it.
-    path = req.environ.get('RAW_PATH_INFO', req.path)
+    path = req.environ.get('HTTP_ORIGINAL_PATH') or \
+        req.environ.get('RAW_PATH_INFO', req.path)
     if req.query_string:
         path += '?' + req.query_string
     if '?' in path:
@@ -831,8 +836,20 @@ class Swift3Middleware(object):
         except:
             return get_err_response('InvalidArgument')(env, start_response)
 
+        path = req.path
+
+        if path.startswith('/v1/'):
+            path = path[3:]
+
+        account, path = split_path(path, 1, 2, True)
+
+        if account.startswith('AUTH_'):
+            account = account[5:]
+
+        path = '/' + path
+
         try:
-            controller, path_parts = self.get_controller(req.path)
+            controller, path_parts = self.get_controller(path)
         except ValueError:
             return get_err_response('InvalidURI')(env, start_response)
 
