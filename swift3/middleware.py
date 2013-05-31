@@ -279,12 +279,31 @@ def canonical_string(req):
         path += '?' + req.query_string
     if '?' in path:
         path, args = path.split('?', 1)
-        for key in urlparse.parse_qs(args, keep_blank_values=True):
-            if key in ('acl', 'logging', 'torrent', 'location',
-                       'requestPayment', 'versioning', 'delete'):
-                return "%s%s?%s" % (buf, path, key)
-    return buf + path
+        qstr = ''
+        qdict = dict(urlparse.parse_qsl(args, keep_blank_values=True))
+        #
+        # List of  sub-resources that must be maintained as part of the HMAC
+        # signature string.
+        #
+        keywords = sorted(['acl', 'delete', 'lifecycle', 'location', 'logging',
+            'notification', 'partNumber', 'policy', 'requestPayment',
+            'torrent', 'uploads', 'uploadId', 'versionId', 'versioning',
+            'versions ', 'website'])
+        for key in qdict:
+            if key in keywords:
+                newstr = key
+                if qdict[key]:
+                    newstr = newstr + '=%s' % qdict[key]
 
+                if qstr == '':
+                    qstr = newstr
+                else:
+                    qstr = qstr + '&%s' % newstr
+
+        if qstr != '':
+            return "%s%s?%s" % (buf, path, qstr)
+
+    return buf + path
 
 def swift_acl_translate(acl, group='', user='', xml=False):
     """
@@ -377,7 +396,7 @@ class ServiceController(WSGIContext):
         status = self._get_status_int()
 
         if status != HTTP_OK:
-            if status == HTTP_UNAUTHORIZED:
+            if status in (HTTP_UNAUTHORIZED, HTTP_FORBIDDEN):
                 return get_err_response('AccessDenied')
             else:
                 return get_err_response('InvalidURI')
@@ -441,17 +460,17 @@ class BucketController(WSGIContext):
         status = self._get_status_int()
         headers = dict(self._response_headers)
 
-        if 'acl' in args:
+        if is_success(status) and 'acl' in args:
             return get_acl(self.account_name, headers)
 
         if 'versioning' in args:
             # Just report there is no versioning configured here.
             body = ('<VersioningConfiguration '
-                'xmlns="http://s3.amazonaws.com/doc/2006-03-01/"/>')
+                    'xmlns="http://s3.amazonaws.com/doc/2006-03-01/"/>')
             return Response(body=body, content_type="text/plain")
 
         if status != HTTP_OK:
-            if status == HTTP_UNAUTHORIZED:
+            if status in (HTTP_UNAUTHORIZED, HTTP_FORBIDDEN):
                 return get_err_response('AccessDenied')
             elif status == HTTP_NOT_FOUND:
                 return get_err_response('NoSuchBucket')
@@ -558,7 +577,7 @@ class BucketController(WSGIContext):
         status = self._get_status_int()
 
         if status != HTTP_CREATED and status != HTTP_NO_CONTENT:
-            if status == HTTP_UNAUTHORIZED:
+            if status in (HTTP_UNAUTHORIZED, HTTP_FORBIDDEN):
                 return get_err_response('AccessDenied')
             elif status == HTTP_ACCEPTED:
                 return get_err_response('BucketAlreadyExists')
@@ -578,7 +597,7 @@ class BucketController(WSGIContext):
         status = self._get_status_int()
 
         if status != HTTP_NO_CONTENT:
-            if status == HTTP_UNAUTHORIZED:
+            if status in (HTTP_UNAUTHORIZED, HTTP_FORBIDDEN):
                 return get_err_response('AccessDenied')
             elif status == HTTP_NOT_FOUND:
                 return get_err_response('NoSuchBucket')
@@ -647,7 +666,7 @@ class BucketController(WSGIContext):
 
     def POST(self, env, start_response):
         """
-        Handle POST Bucket (Delete Multiple Objects) request
+        Handle POST Bucket (Delete/Upload Multiple Objects) request
         """
         if 'QUERY_STRING' in env:
             args = dict(urlparse.parse_qsl(env['QUERY_STRING'], 1))
@@ -657,8 +676,15 @@ class BucketController(WSGIContext):
         if 'delete' in args:
             return self._delete_multiple_objects(env)
 
-        return get_err_response('Unsupported')
+        if 'uploads' in args:
+            # Pass it through, the s3multi upload helper will handle it.
+            return self.app(env,start_response)
 
+        if 'uploadId' in args:
+            # Pass it through, the s3multi upload helper will handle it.
+            return self.app(env, start_response)
+
+        return get_err_response('Unsupported')
 
 class ObjectController(WSGIContext):
     """
@@ -678,19 +704,28 @@ class ObjectController(WSGIContext):
             args = dict(urlparse.parse_qsl(env['QUERY_STRING'], 1))
         else:
             args = {}
+
+        # Let s3multi handle it.
+        if 'uploadId' in args:
+            return self.app(env, start_response)
+
         if 'acl' in args:
             # ACL requests need to make a HEAD call rather than GET
             env['REQUEST_METHOD'] = 'HEAD'
+            env['SCRIPT_NAME'] = ''
+            env['QUERY_STRING'] = ''
 
         app_iter = self._app_call(env)
-        if env['REQUEST_METHOD'] == 'HEAD':
-            app_iter = None
-
         status = self._get_status_int()
         headers = dict(self._response_headers)
 
+        if env['REQUEST_METHOD'] == 'HEAD':
+            app_iter = None
+
         if is_success(status):
             if 'acl' in args:
+                # Method must be GET or the body wont be returned to the caller
+                env['REQUEST_METHOD'] = 'GET'
                 return get_acl(self.account_name, headers)
 
             new_hdrs = {}
@@ -703,7 +738,7 @@ class ObjectController(WSGIContext):
                               'etag', 'last-modified'):
                     new_hdrs[key] = val
             return Response(status=status, headers=new_hdrs, app_iter=app_iter)
-        elif status == HTTP_UNAUTHORIZED:
+        elif status in (HTTP_UNAUTHORIZED, HTTP_FORBIDDEN):
             return get_err_response('AccessDenied')
         elif status == HTTP_NOT_FOUND:
             return get_err_response('NoSuchKey')
@@ -746,7 +781,7 @@ class ObjectController(WSGIContext):
         status = self._get_status_int()
 
         if status != HTTP_CREATED:
-            if status == HTTP_UNAUTHORIZED:
+            if status in (HTTP_UNAUTHORIZED, HTTP_FORBIDDEN):
                 return get_err_response('AccessDenied')
             elif status == HTTP_NOT_FOUND:
                 return get_err_response('NoSuchBucket')
@@ -763,6 +798,9 @@ class ObjectController(WSGIContext):
 
         return Response(status=200, etag=self._response_header_value('etag'))
 
+    def POST(self, env, start_response):
+        return get_err_response('AccessDenied')
+
     def DELETE(self, env, start_response):
         """
         Handle DELETE Object request
@@ -771,7 +809,7 @@ class ObjectController(WSGIContext):
         status = self._get_status_int()
 
         if status != HTTP_NO_CONTENT:
-            if status == HTTP_UNAUTHORIZED:
+            if status in (HTTP_UNAUTHORIZED, HTTP_FORBIDDEN):
                 return get_err_response('AccessDenied')
             elif status == HTTP_NOT_FOUND:
                 return get_err_response('NoSuchKey')
@@ -790,14 +828,23 @@ class Swift3Middleware(object):
         self.conf = conf
         self.logger = get_logger(self.conf, log_route='swift3')
 
-    def get_controller(self, path):
+    def get_controller(self, env, path):
         container, obj = split_path(path, 0, 2, True)
         d = dict(container_name=container, object_name=obj)
 
+        if 'QUERY_STRING' in env:
+            args = dict(urlparse.parse_qsl(env['QUERY_STRING'], 1))
+        else:
+            args = {}
+
         if container and obj:
+            if env['REQUEST_METHOD'] == 'POST':
+                if 'uploads' or 'uploadId' in args:
+                    return BucketController, d
             return ObjectController, d
         elif container:
             return BucketController, d
+
         return ServiceController, d
 
     def __call__(self, env, start_response):
@@ -810,7 +857,7 @@ class Swift3Middleware(object):
     def handle_request(self, env, start_response):
         req = Request(env)
         self.logger.debug('Calling Swift3 Middleware')
-        self.logger.debug(req.__dict__)
+	self.logger.debug(req.__dict__)
 
         if 'AWSAccessKeyId' in req.params:
             try:
@@ -849,12 +896,16 @@ class Swift3Middleware(object):
         path = '/' + path
 
         try:
-            controller, path_parts = self.get_controller(path)
+            controller, path_parts = self.get_controller(env, path)
         except ValueError:
             return get_err_response('InvalidURI')(env, start_response)
 
         if 'Date' in req.headers:
             date = email.utils.parsedate(req.headers['Date'])
+            if date is None and 'Expires' in req.params:
+                d = email.utils.formatdate(float(req.params['Expires']))
+                date = email.utils.parsedate(d)
+
             if date is None:
                 return get_err_response('AccessDenied')(env, start_response)
 
@@ -865,7 +916,7 @@ class Swift3Middleware(object):
             if d1 < epoch:
                 return get_err_response('AccessDenied')(env, start_response)
 
-            delta = datetime.timedelta(seconds=60 * 10)
+            delta = datetime.timedelta(seconds=60 * 5)
             if d1 - d2 > delta or d2 - d1 > delta:
                 return get_err_response('RequestTimeTooSkewed')(env,
                                                                 start_response)
