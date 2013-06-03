@@ -900,11 +900,20 @@ class Swift3Middleware(object):
         except ValueError:
             return get_err_response('InvalidURI')(env, start_response)
 
-        if 'Date' in req.headers:
+        if 'Expires' in req.params:
+            unix_date = float(req.params['Expires'])
+
+            if unix_date < 0:
+                return get_err_response('AccessDenied')(env, start_response)
+
+            d = email.utils.formatdate(unix_date)
+            date = email.utils.parsedate(d)
+
+            if date < datetime.datetime.utcnow():
+                return get_err_response('AccessDenied')(env, start_response)
+
+        elif 'Date' in req.headers:
             date = email.utils.parsedate(req.headers['Date'])
-            if date is None and 'Expires' in req.params:
-                d = email.utils.formatdate(float(req.params['Expires']))
-                date = email.utils.parsedate(d)
 
             if date is None:
                 return get_err_response('AccessDenied')(env, start_response)
