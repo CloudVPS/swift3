@@ -908,6 +908,7 @@ class Swift3Middleware(object):
 
             d = email.utils.formatdate(unix_date)
             date = email.utils.parsedate(d)
+            date = datetime.datetime(*date[0:6])
 
             if date < datetime.datetime.utcnow():
                 return get_err_response('AccessDenied')(env, start_response)
