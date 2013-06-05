@@ -857,7 +857,6 @@ class Swift3Middleware(object):
     def handle_request(self, env, start_response):
         req = Request(env)
         self.logger.debug('Calling Swift3 Middleware')
-	self.logger.debug(req.__dict__)
 
         if 'AWSAccessKeyId' in req.params:
             try:
@@ -876,7 +875,8 @@ class Swift3Middleware(object):
             return get_err_response('AccessDenied')(env, start_response)
 
         if keyword != 'AWS':
-            return get_err_response('AccessDenied')(env, start_response)
+            # This wasn't an S3 request
+            return self.app(env, start_response)
 
         try:
             account, signature = info.rsplit(':', 1)
